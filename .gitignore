@@ -8,3 +8,9 @@ env.bak/
 venv.bak/
 
 credentials.json
+
+__pycache__/
+.idea/
+.DS_Store
+*.pyc
+*.sqlite3
