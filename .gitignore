@@ -15,3 +15,4 @@ __pycache__/
 *.pyc
 *.sqlite3
 test_env.txt
+test_env.txt
