@@ -14,3 +14,4 @@ __pycache__/
 .DS_Store
 *.pyc
 *.sqlite3
+test_env.txt
