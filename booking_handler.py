@@ -5,6 +5,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 import re
 from datetime import datetime
+from tinkoff_payment import init_payment
 import logging
 
 
@@ -59,7 +60,7 @@ class BookingHandler:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✅ Подтвердить",
+                    text="✅ Подтвердить и оплатить",
                     callback_data=BookingCallback(action="confirm").pack()
                 ),
                 InlineKeyboardButton(
@@ -279,6 +280,7 @@ class BookingHandler:
 
 ---
 **Все данные указаны верно?**
+После подтверждения вы будете перенаправлены на страницу оплаты Тинькофф.
 """
 
         await state.update_data(price=price, event_name=event['name'])
@@ -288,52 +290,100 @@ class BookingHandler:
         await message.answer(summary, reply_markup=keyboard, parse_mode="Markdown")
 
     async def confirm_booking(self, callback: CallbackQuery, state: FSMContext):
-        """Подтверждение и сохранение бронирования"""
-        data = await state.get_data()
-        user = callback.from_user
+        """Подтверждение и создание платежа"""
+        try:
+            data = await state.get_data()
+            user = callback.from_user
 
-        # Подготавливаем данные для Google Sheets
-        booking_data = {
-            'telegram_id': user.id,
-            'username': user.username or '',
-            'full_name': data['full_name'],
-            'phone': data['phone'],
-            'passport_series': data['passport_series'],
-            'passport_number': data['passport_number'],
-            'birth_date': data['birth_date'],
-            'event_name': data['event_name'],
-            'price': data['price'],
-            'payment_status': 'Не оплачено',
-            'notes': f"Бронирование через Telegram бота"
-        }
+            # Подготавливаем данные для Google Sheets
+            booking_data = {
+                'telegram_id': user.id,
+                'username': user.username or '',
+                'full_name': data['full_name'],
+                'phone': data['phone'],
+                'passport_series': data['passport_series'],
+                'passport_number': data['passport_number'],
+                'birth_date': data['birth_date'],
+                'event_name': data['event_name'],
+                'price': data['price'],
+                'payment_status': 'Ожидает оплаты',
+                'booking_date': datetime.now().strftime("%d.%m.%Y %H:%M"),
+                'notes': f"Бронирование через Telegram бота"
+            }
 
-        # Сохраняем в Google Sheets
-        success = self.sheets_client.add_booking(booking_data)
+            # Сохраняем в Google Sheets
+            success = self.sheets_client.add_booking(booking_data)
 
-        if success:
-            await callback.message.edit_text(
-                f"""
-🎉 **БРОНИРОВАНИЕ ПОДТВЕРЖДЕНО!**
+            if not success:
+                await callback.message.edit_text(
+                    "❌ **Ошибка при сохранении бронирования**\n\n"
+                    "Пожалуйста, обратитесь к администратору:\n"
+                    "📱 @chebextreme или +7 927 669 19 52",
+                    parse_mode="Markdown"
+                )
+                await callback.answer()
+                return
 
-Ваша заявка принята и сохранена.
-Номер бронирования: #{user.id}{int(datetime.now().timestamp())}
+            # Создаем платеж в Тинькофф
+            try:
+                payment_url = init_payment(
+                    amount=data['price'],
+                    description=f"{data['event_name']} - {data['full_name']}",
+                    customer_id=str(user.id)
+                )
 
-📞 **Что дальше:**
-1. Мы свяжемся с вами для подтверждения
-2. Отправим реквизиты для оплаты
-3. После оплаты пришлем подробную программу
+                await callback.message.edit_text(
+                    f"""
+🎉 **БРОНИРОВАНИЕ ПРИНЯТО!**
 
-📱 **Остались вопросы?**
-Пишите: @chebextreme или +7 927 669 19 52
+✅ Ваша заявка сохранена
+📋 Номер: #{user.id}{int(datetime.now().timestamp()) % 10000}
+
+💳 **Для завершения бронирования перейдите к оплате:**
+
+🔗 [ОПЛАТИТЬ {data['price']:,} ₽]({payment_url})
+
+⏰ **Важно:**
+• Ссылка действительна 15 минут
+• После оплаты бронирование подтвердится автоматически
+• Вы получите чек на указанный телефон
+
+📞 **Вопросы:** @chebextreme или +7 927 669 19 52
 
 Спасибо за выбор ChebEXTREME! 🏕️
 """,
-                parse_mode="Markdown"
-            )
-        else:
+                    parse_mode="Markdown",
+                    disable_web_page_preview=False
+                )
+
+            except Exception as payment_error:
+                logging.error(f"Ошибка создания платежа: {payment_error}")
+
+                # Обновляем статус в Google Sheets
+                self.sheets_client.update_booking_status(user.id, "Ошибка оплаты")
+
+                await callback.message.edit_text(
+                    f"""
+❌ **ОШИБКА СОЗДАНИЯ ПЛАТЕЖА**
+
+Ваше бронирование сохранено, но возникла проблема с платежной системой.
+
+📋 **Номер бронирования:** #{user.id}{int(datetime.now().timestamp()) % 10000}
+
+📞 **Для завершения оплаты обратитесь к нам:**
+• Telegram: @chebextreme
+• Телефон: +7 927 669 19 52
+
+Мы поможем завершить оплату другим способом.
+""",
+                    parse_mode="Markdown"
+                )
+
+        except Exception as e:
+            logging.error(f"Ошибка при подтверждении бронирования: {e}")
             await callback.message.edit_text(
-                "❌ **Ошибка при сохранении бронирования**\n\n"
-                "Пожалуйста, обратитесь к администратору:\n"
+                "❌ **Произошла ошибка**\n\n"
+                "Пожалуйста, попробуйте позже или обратитесь к администратору:\n"
                 "📱 @chebextreme или +7 927 669 19 52",
                 parse_mode="Markdown"
             )
